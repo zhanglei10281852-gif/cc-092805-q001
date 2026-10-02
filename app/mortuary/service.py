@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from app.core.clock import Clock, SystemClock, to_storage
@@ -112,6 +112,19 @@ class MortuaryService:
             rows = self.connection.execute("SELECT * FROM facility_resources ORDER BY kind,code").fetchall()
         return [dict(row) for row in rows]
 
+    def resource_schedule(self, code: str, start_at: datetime | None = None, end_at: datetime | None = None) -> dict[str, Any]:
+        resource = self.repository.resource_code(code)
+        if resource is None or not resource["active"]:
+            raise NotFoundError("设施资源不存在或已停用")
+        if (start_at is None) != (end_at is None):
+            raise ValidationError("查询时段需要同时提供开始与结束时间")
+        window_start = to_storage(start_at) if start_at is not None else None
+        window_end = to_storage(end_at) if end_at is not None else None
+        if window_start is not None and window_end is not None and window_end <= window_start:
+            raise ValidationError("查询结束时间必须晚于开始时间")
+        reservations = self.repository.resource_schedule(resource["id"], window_start, window_end)
+        return {"resource_id": resource["id"], "resource_code": resource["code"], "name": resource["name"], "kind": resource["kind"], "site_code": resource["site_code"], "capacity": int(resource["capacity"]), "occupied": len(reservations), "reservations": reservations}
+
     def reserve(self, payload: dict[str, Any]) -> dict[str, Any]:
         now = self.now()
         start_at = to_storage(payload["start_at"])
@@ -130,7 +143,18 @@ class MortuaryService:
                 return repo.reservation(existing["id"]) or existing
             conflicts = repo.conflicts(resource["id"], start_at, end_at)
             if len(conflicts) >= int(resource["capacity"]):
-                raise ConflictError("预约时段与现有安排冲突", context={"conflict_ids": [x["id"] for x in conflicts]})
+                raise ConflictError(
+                    "预约时段与现有安排冲突",
+                    context={
+                        "resource_code": payload["resource_code"],
+                        "capacity": int(resource["capacity"]),
+                        "conflict_ids": [x["id"] for x in conflicts],
+                        "conflicts": [
+                            {"reservation_id": x["id"], "case_id": x["case_id"], "case_ref": x["case_ref"], "start_at": x["start_at"], "end_at": x["end_at"], "purpose": x["purpose"], "created_by": x["created_by"]}
+                            for x in conflicts
+                        ],
+                    },
+                )
             cursor = connection.execute("INSERT INTO facility_reservations(resource_id,case_id,start_at,end_at,purpose,created_by,idempotency_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (resource["id"], payload["case_id"], start_at, end_at, payload["purpose"], payload["created_by"], payload["idempotency_key"], now, now))
             reservation = repo.reservation(int(cursor.lastrowid)) or {}
             connection.execute("UPDATE mortuary_cases SET status='services_planned',version=version+1,updated_at=? WHERE id=? AND status IN ('registered','in_custody')", (now, payload["case_id"]))
@@ -150,6 +174,21 @@ class MortuaryService:
                 raise ConflictError("已完成的预约不能取消")
             connection.execute("UPDATE facility_reservations SET status='cancelled',updated_at=? WHERE id=?", (now, reservation_id))
             repo.event("case", reservation["case_id"], "reservation.cancelled", actor, {"reservation_id": reservation_id, "reason": reason}, now)
+            return repo.reservation(reservation_id) or {}
+
+    def complete_reservation(self, reservation_id: int, actor: str) -> dict[str, Any]:
+        now = self.now()
+        with transaction(immediate=True) as connection:
+            repo = MortuaryRepository(connection)
+            reservation = repo.reservation(reservation_id)
+            if reservation is None:
+                raise NotFoundError("预约记录不存在")
+            if reservation["status"] == "completed":
+                return reservation
+            if reservation["status"] != "confirmed":
+                raise ConflictError("当前预约状态不能完成")
+            connection.execute("UPDATE facility_reservations SET status='completed',updated_at=? WHERE id=?", (now, reservation_id))
+            repo.event("case", reservation["case_id"], "reservation.completed", actor, {"reservation_id": reservation_id}, now)
             return repo.reservation(reservation_id) or {}
 
     def add_order(self, payload: dict[str, Any]) -> dict[str, Any]:

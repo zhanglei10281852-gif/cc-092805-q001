@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Query
 
 from app.mortuary.schemas import BurialRightCreate, BurialRightRenew, CaseCreate, CustodyAccept, CustodyTransferCreate, InvoiceCreate, PaymentCreate, ReservationCreate, ResourceCreate, ServiceOrderCreate
@@ -33,6 +35,10 @@ def create_resource(payload: ResourceCreate, actor: str = Query(min_length=2, ma
 def resources(kind: str | None = None) -> list[dict]:
     return MortuaryService().list_resources(kind)
 
+@router.get("/resources/{code}/schedule")
+def resource_schedule(code: str, start_at: datetime | None = None, end_at: datetime | None = None) -> dict:
+    return MortuaryService().resource_schedule(code, start_at, end_at)
+
 @router.post("/reservations", status_code=201)
 def reserve(payload: ReservationCreate) -> dict:
     return MortuaryService().reserve(payload.model_dump())
@@ -40,6 +46,10 @@ def reserve(payload: ReservationCreate) -> dict:
 @router.post("/reservations/{reservation_id}/cancel")
 def cancel(reservation_id: int, actor: str = Query(min_length=2), reason: str = Query(min_length=2, max_length=500)) -> dict:
     return MortuaryService().cancel_reservation(reservation_id, actor, reason)
+
+@router.post("/reservations/{reservation_id}/complete")
+def complete(reservation_id: int, actor: str = Query(min_length=2, max_length=80)) -> dict:
+    return MortuaryService().complete_reservation(reservation_id, actor)
 
 @router.post("/service-orders", status_code=201)
 def order(payload: ServiceOrderCreate) -> dict:

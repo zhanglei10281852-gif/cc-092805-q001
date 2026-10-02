@@ -114,7 +114,21 @@ class MortuaryRepository:
         return self.one(self.connection.execute("SELECT r.*,f.code resource_code,f.kind resource_kind FROM facility_reservations r JOIN facility_resources f ON f.id=r.resource_id WHERE r.id=?", (reservation_id,)).fetchone())
 
     def conflicts(self, resource_id: int, start_at: str, end_at: str) -> list[dict[str, Any]]:
-        rows = self.connection.execute("SELECT * FROM facility_reservations WHERE resource_id=? AND status='confirmed' AND start_at>=? AND start_at<? ORDER BY start_at", (resource_id, start_at, end_at)).fetchall()
+        rows = self.connection.execute(
+            "SELECT r.*,c.external_ref case_ref FROM facility_reservations r JOIN mortuary_cases c ON c.id=r.case_id "
+            "WHERE r.resource_id=? AND r.status='confirmed' AND r.start_at<? AND r.end_at>? ORDER BY r.start_at,r.id",
+            (resource_id, end_at, start_at),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def resource_schedule(self, resource_id: int, start_at: str | None = None, end_at: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT r.*,c.external_ref case_ref FROM facility_reservations r JOIN mortuary_cases c ON c.id=r.case_id WHERE r.resource_id=? AND r.status='confirmed'"
+        params: list[Any] = [resource_id]
+        if start_at is not None and end_at is not None:
+            sql += " AND r.start_at<? AND r.end_at>?"
+            params.extend([end_at, start_at])
+        sql += " ORDER BY r.start_at,r.id"
+        rows = self.connection.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
     def order(self, order_id: int) -> dict[str, Any] | None:
