@@ -114,7 +114,29 @@ class MortuaryRepository:
         return self.one(self.connection.execute("SELECT r.*,f.code resource_code,f.kind resource_kind FROM facility_reservations r JOIN facility_resources f ON f.id=r.resource_id WHERE r.id=?", (reservation_id,)).fetchone())
 
     def conflicts(self, resource_id: int, start_at: str, end_at: str) -> list[dict[str, Any]]:
-        rows = self.connection.execute("SELECT * FROM facility_reservations WHERE resource_id=? AND status='confirmed' AND start_at>=? AND start_at<? ORDER BY start_at", (resource_id, start_at, end_at)).fetchall()
+        # 半开区间 [start_at, end_at)：两区间仅在 existing.start < new.end 且
+        # existing.end > new.start 时相交，首尾相接（existing.end == new.start）不冲突。
+        # 这同时覆盖：既有预约包住新时段、新时段跨过既有预约、任一侧部分重叠。
+        rows = self.connection.execute(
+            "SELECT r.*, c.external_ref AS case_ref, c.decedent_name AS decedent_name, c.family_contact AS family_contact "
+            "FROM facility_reservations r JOIN mortuary_cases c ON c.id=r.case_id "
+            "WHERE r.resource_id=? AND r.status='confirmed' AND r.start_at<? AND r.end_at>? "
+            "ORDER BY r.start_at,r.id",
+            (resource_id, end_at, start_at),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reservations_in_window(self, resource_id: int, start_at: str, end_at: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT r.*, f.code AS resource_code, f.kind AS resource_kind, f.name AS resource_name, "
+            "c.external_ref AS case_ref, c.decedent_name AS decedent_name, c.family_contact AS family_contact "
+            "FROM facility_reservations r "
+            "JOIN facility_resources f ON f.id=r.resource_id "
+            "JOIN mortuary_cases c ON c.id=r.case_id "
+            "WHERE r.resource_id=? AND r.start_at<? AND r.end_at>? "
+            "ORDER BY r.start_at,r.id",
+            (resource_id, end_at, start_at),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def order(self, order_id: int) -> dict[str, Any] | None:

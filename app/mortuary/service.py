@@ -130,7 +130,30 @@ class MortuaryService:
                 return repo.reservation(existing["id"]) or existing
             conflicts = repo.conflicts(resource["id"], start_at, end_at)
             if len(conflicts) >= int(resource["capacity"]):
-                raise ConflictError("预约时段与现有安排冲突", context={"conflict_ids": [x["id"] for x in conflicts]})
+                raise ConflictError(
+                    "预约时段与现有安排冲突",
+                    context={
+                        "resource_code": payload["resource_code"],
+                        "requested_start_at": start_at,
+                        "requested_end_at": end_at,
+                        "capacity": int(resource["capacity"]),
+                        "occupancy": len(conflicts),
+                        "conflict_ids": [x["id"] for x in conflicts],
+                        "occupants": [
+                            {
+                                "reservation_id": x["id"],
+                                "case_id": x["case_id"],
+                                "case_ref": x["case_ref"],
+                                "decedent_name": x["decedent_name"],
+                                "family_contact": x["family_contact"],
+                                "start_at": x["start_at"],
+                                "end_at": x["end_at"],
+                                "purpose": x["purpose"],
+                            }
+                            for x in conflicts
+                        ],
+                    },
+                )
             cursor = connection.execute("INSERT INTO facility_reservations(resource_id,case_id,start_at,end_at,purpose,created_by,idempotency_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (resource["id"], payload["case_id"], start_at, end_at, payload["purpose"], payload["created_by"], payload["idempotency_key"], now, now))
             reservation = repo.reservation(int(cursor.lastrowid)) or {}
             connection.execute("UPDATE mortuary_cases SET status='services_planned',version=version+1,updated_at=? WHERE id=? AND status IN ('registered','in_custody')", (now, payload["case_id"]))
@@ -151,6 +174,43 @@ class MortuaryService:
             connection.execute("UPDATE facility_reservations SET status='cancelled',updated_at=? WHERE id=?", (now, reservation_id))
             repo.event("case", reservation["case_id"], "reservation.cancelled", actor, {"reservation_id": reservation_id, "reason": reason}, now)
             return repo.reservation(reservation_id) or {}
+
+    def complete_reservation(self, reservation_id: int, actor: str) -> dict[str, Any]:
+        now = self.now()
+        with transaction(immediate=True) as connection:
+            repo = MortuaryRepository(connection)
+            reservation = repo.reservation(reservation_id)
+            if reservation is None:
+                raise NotFoundError("预约记录不存在")
+            if reservation["status"] in {"completed", "cancelled"}:
+                # 重复完成保持幂等：已终结的预约直接返回原记录，不重复写事件、不重复占容量。
+                return reservation
+            connection.execute("UPDATE facility_reservations SET status='completed',updated_at=? WHERE id=?", (now, reservation_id))
+            repo.event("case", reservation["case_id"], "reservation.completed", actor, {"reservation_id": reservation_id, "resource_code": reservation["resource_code"]}, now)
+            return repo.reservation(reservation_id) or {}
+
+    def resource_schedule(self, resource_code: str, start_at: str, end_at: str) -> dict[str, Any]:
+        if end_at <= start_at:
+            raise ValidationError("查询结束时间必须晚于开始时间")
+        resource = self.repository.resource_code(resource_code)
+        if resource is None or not resource["active"]:
+            raise NotFoundError("设施资源不存在或已停用")
+        reservations = self.repository.reservations_in_window(resource["id"], start_at, end_at)
+        capacity = int(resource["capacity"])
+        timeline = [{**item, "overlaps_query_window": item["start_at"] < end_at and item["end_at"] > start_at} for item in reservations]
+        confirmed = [r for r in timeline if r["status"] == "confirmed" and r["overlaps_query_window"]]
+        return {
+            "resource_code": resource["code"],
+            "resource_name": resource["name"],
+            "kind": resource["kind"],
+            "capacity": capacity,
+            "window_start_at": start_at,
+            "window_end_at": end_at,
+            "confirmed_count": len(confirmed),
+            "available_capacity": max(0, capacity - len(confirmed)),
+            "fully_booked": len(confirmed) >= capacity,
+            "reservations": timeline,
+        }
 
     def add_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         now = self.now()

@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Query
+from datetime import datetime
 
+from app.core.clock import to_storage
 from app.mortuary.schemas import BurialRightCreate, BurialRightRenew, CaseCreate, CustodyAccept, CustodyTransferCreate, InvoiceCreate, PaymentCreate, ReservationCreate, ResourceCreate, ServiceOrderCreate
 from app.mortuary.service import MortuaryService
 
@@ -40,6 +42,19 @@ def reserve(payload: ReservationCreate) -> dict:
 @router.post("/reservations/{reservation_id}/cancel")
 def cancel(reservation_id: int, actor: str = Query(min_length=2), reason: str = Query(min_length=2, max_length=500)) -> dict:
     return MortuaryService().cancel_reservation(reservation_id, actor, reason)
+
+@router.post("/reservations/{reservation_id}/complete")
+def complete(reservation_id: int, actor: str = Query(min_length=2, max_length=80)) -> dict:
+    return MortuaryService().complete_reservation(reservation_id, actor)
+
+@router.get("/resources/{resource_code}/schedule")
+def resource_schedule(
+    resource_code: str,
+    start_at: datetime = Query(...),
+    end_at: datetime = Query(...),
+) -> dict:
+    service = MortuaryService()
+    return service.resource_schedule(resource_code, to_storage(start_at), to_storage(end_at))
 
 @router.post("/service-orders", status_code=201)
 def order(payload: ServiceOrderCreate) -> dict:
